@@ -44,23 +44,30 @@ class Chat:
         
         url = img_resp.data[0].url
         
+        if not url.startswith("http"):
+            raise ValueError("Invalid image URL")
+
         # Save image
         with open(filename, "wb") as f:
             f.write(requests.get(url).content)
         
         return url
 
-    async def imageGenerationAsync(self, prompt: str, model: str, resolution: tuple[int, int], filename: str):
+    async def imageGenerationAsync(self, prompt: str, model: str, resolution: tuple[int, int], filename: str, specified_provider = None):
         img_resp = await self.asy_client.images.generate(
             model=model,
             prompt=prompt,
             response_format="url",
             width=resolution[0],
-            height=resolution[1]
+            height=resolution[1],
+            provider= self.provider if not specified_provider else specified_provider
         )
         
         url = img_resp.data[0].url
         
+        if not url.startswith("http"):
+            raise ValueError("Invalid image URL")
+
         # Save image
         with open(filename, "wb") as f:
             f.write(requests.get(url).content)

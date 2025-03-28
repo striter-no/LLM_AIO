@@ -28,6 +28,12 @@ users = sql_db.DataBase("./databases/users.sqllite")
 
 MAIN_PROVIDER = gpt.provider_stock.PollinationsAI
 
+def md2esc(target: str) -> str:
+    simbs = ['(', ')', '~', '#', '+', '-', '=', '{', '}', '.', '!' ]
+    for i in simbs:
+        target = target.replace(i, f'\\{i}')
+    return target
+
 def check_file(path: str) -> bool:
     try:
         with open(path, "r") as f:
@@ -36,57 +42,6 @@ def check_file(path: str) -> bool:
     except Exception as e:
         print(f"Error while checking file {path}: {str(e)}")
         return False
-
-@dp.inline_query()
-async def send_photo(inline_query: types.InlineQuery):
-    # Пример URL изображения
-    text = inline_query.query
-    uid = inline_query.from_user.id
-    token = random.randint(0, 10000)
-    text_res = "Internal error occurred"
-
-    if users.get(uid) is None:
-        users.set(uid, {"base_model": "gpt-4o-mini", "img_model": "flux", "messages": []})
-    
-    user_data = users.get(uid)
-    chat = gpt.Chat( provider=MAIN_PROVIDER, model=user_data["base_model"])
-    chat.systemQuery = gptconf["general"]
-    chat.messages = user_data["messages"]
-    
-    time = 1
-    while True:
-        try:
-            answer = await chat.addMessageAsync( query=text )
-            break
-        except gpt.g4f.errors.ResponseStatusError as e:
-            if "500" in str(e):
-                # await bot.send_message(message.chat.id, "Ваша текущая конфигурация не подходит под вашу задачу, попробуйте поменять модель")
-                return
-        except Exception as e:
-            print(f"Error adding message: {e}")
-            await asyncio.sleep(time)
-            time *= 1.5
-
-    user_data["messages"].append((text, answer))
-    users.set(uid, user_data)
-    
-    parsed_ans = xml.parse_xml_like(answer)
-    builder = types.InlineKeyboardBuilder()
-    if parsed_ans.get("image", None) is not None:
-        img_url = await chat.imageGenerationAsync(
-            prompt=parsed_ans["image"], 
-            model=user_data["img_model"], 
-            resolution=(2000, 2000), 
-            filename=f"./runtime/images/answer_img_{token}.png"
-        )
-        results = [
-            types.InlineQueryResultPhoto(
-                id=str(uuid.uuid4()),  # Уникальный ID (до 64 байт)
-                photo_url=img_url,
-                reply_markup=builder.as_markup()
-            )
-        ]
-        await bot.answer_inline_query(inline_query.id, results=results, cache_time=1)
 
 @dp.message()
 async def handle_message(message: Message) -> None:
@@ -188,6 +143,7 @@ async def handle_message(message: Message) -> None:
                 await bot.send_message(message.chat.id, f"Ваша статистика:\n\nОсновная (текстовая) модель: {user_data["base_model"]}\nМодель для изображений: {user_data["img_model"]}\nКоличество сообщений: {len(user_data["messages"])}")
 
         else:
+            message_todel = await bot.send_message(message.chat.id, "В процессе ответа...")
             if users.get(uid) is None:
                 users.set(uid, {"base_model": "gpt-4o-mini", "img_model": "flux", "messages": []})
             
@@ -213,18 +169,100 @@ async def handle_message(message: Message) -> None:
             user_data["messages"].append((text, answer))
             users.set(uid, user_data)
             
+            # print(answer)
             parsed_ans = xml.parse_xml_like(answer)
 
             if parsed_ans.get("image", None) is not None:
+                # print(parsed_ans)
                 img_url = await chat.imageGenerationAsync(
                     prompt=parsed_ans["image"], 
                     model=user_data["img_model"], 
-                    resolution=(2000, 2000), 
-                    filename=f"./runtime/images/answer_img_{token}.png"
+                    resolution=(2000, 2000),
+                    specified_provider=gpt.provider_stock.PollinationsImage,
+                    filename=f"./runtime/images/answer_img_.png" # {token}
                 )
-                await bot.send_photo(message.chat.id, img_url, caption=parsed_ans["answer"], parse_mode=None)
+                repl = f"**>{parsed_ans["image"]}||\n{parsed_ans["answer"]}"
+                try:
+                    await bot.send_photo(message.chat.id, img_url, caption=md2esc(repl), parse_mode = ParseMode.MARKDOWN_V2)
+                except Exception as e:
+                    await bot.delete_message(message.chat.id, message_todel.message_id)
+                    
+                    if "caption is too long" in str(e):
+                        await bot.send_photo(message.chat.id, img_url)
+                        await bot.send_message(message.chat.id, md2esc(repl), parse_mode = ParseMode.MARKDOWN_V2)
+                        print(f"Error sending image: {e}")
+                    else:
+                        await bot.send_message(message.chat.id, "Не удалось выполнить генерацию\\. Попробуйте еще раз", parse_mode=ParseMode.MARKDOWN_V2)
             else:
-                await message.reply(parsed_ans["answer"], parse_mode=None)
+                await message.reply(md2esc(parsed_ans["answer"]), parse_mode=ParseMode.MARKDOWN_V2)
+            
+            
+
+@dp.inline_query()
+async def send_photo(inline_query: types.InlineQuery):
+    # Пример URL изображения
+    text = inline_query.query
+    uid = inline_query.from_user.id
+    token = random.randint(0, 10000)
+    text_res = "Internal error occurred"
+
+    if users.get(uid) is None:
+        users.set(uid, {"base_model": "gpt-4o-mini", "img_model": "flux", "messages": []})
+    
+    user_data = users.get(uid)
+    chat = gpt.Chat( provider=MAIN_PROVIDER, model=user_data["base_model"])
+    chat.systemQuery = gptconf["general"]
+    chat.messages = user_data["messages"]
+    
+    text = "Сгенерируй изображение по такому запросу: " + text
+    print(text)
+
+    time = 1
+    while True:
+        try:
+            answer = await chat.addMessageAsync( query=text )
+            break
+        except gpt.g4f.errors.ResponseStatusError as e:
+            if "500" in str(e):
+                print(f"Error 500 response")
+                # await bot.send_message(message.chat.id, "Ваша текущая конфигурация не подходит под вашу задачу, попробуйте поменять модель")
+                return
+        except Exception as e:
+            print(f"Error adding message: {e}")
+            
+            await asyncio.sleep(time)
+            time *= 1.5
+
+    user_data["messages"].append((text, answer))
+    users.set(uid, user_data)
+    
+    print(answer)
+
+    parsed_ans = xml.parse_xml_like(answer)
+    if parsed_ans.get("image", None):
+        img_url = await chat.imageGenerationAsync(
+            prompt=parsed_ans["image"], 
+            model=user_data["img_model"], 
+            resolution=(2000, 2000), 
+            filename=f"./runtime/images/inline_result.png"
+        )
+        repl = f"**>{parsed_ans["image"]}||"
+        print(f"Generated:\n{repl}\n\n{img_url}\n{str(uuid.uuid4())}")
+        results = [
+            types.InlineQueryResultPhoto(
+                id=str(uuid.uuid4()),  # Уникальный ID (до 64 байт)
+                photo_url=img_url,
+                thumbnail_url=img_url,
+                caption=md2esc(repl),
+                parse_mode=ParseMode.MARKDOWN_V2,
+                photo_width=2000,  # Добавьте ширину
+                photo_height=2000
+            )
+        ]
+        try:
+            await bot.answer_inline_query(inline_query.id, results=results, cache_time=300, is_personal=True)
+        except Exception as e:
+            print(f"Error sending inline query: {e}")
 
 async def main() -> None:
     global bot
