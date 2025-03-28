@@ -161,7 +161,6 @@ async def handle_message(message: Message) -> None:
             users.set(uid, user_data)
             
             parsed_ans = xml.parse_xml_like(answer)
-            print(parsed_ans)
 
             if parsed_ans.get("image", None) is not None:
                 img_url = await chat.imageGenerationAsync(
