@@ -6,6 +6,7 @@ from aiogram.types import FSInputFile
 from aiogram.types import Message
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
+from aiogram import types
 
 import src.sql_db as sql_db
 import src.xml_utils as xml
@@ -14,6 +15,7 @@ import src.gpt as gpt
 import json as jn
 import asyncio
 import random
+import uuid
 
 dp = Dispatcher()
 bot: Bot = None;
@@ -34,6 +36,57 @@ def check_file(path: str) -> bool:
     except Exception as e:
         print(f"Error while checking file {path}: {str(e)}")
         return False
+
+@dp.inline_query()
+async def send_photo(inline_query: types.InlineQuery):
+    # Пример URL изображения
+    text = inline_query.query
+    uid = inline_query.from_user.id
+    token = random.randint(0, 10000)
+    text_res = "Internal error occurred"
+
+    if users.get(uid) is None:
+        users.set(uid, {"base_model": "gpt-4o-mini", "img_model": "flux", "messages": []})
+    
+    user_data = users.get(uid)
+    chat = gpt.Chat( provider=MAIN_PROVIDER, model=user_data["base_model"])
+    chat.systemQuery = gptconf["general"]
+    chat.messages = user_data["messages"]
+    
+    time = 1
+    while True:
+        try:
+            answer = await chat.addMessageAsync( query=text )
+            break
+        except gpt.g4f.errors.ResponseStatusError as e:
+            if "500" in str(e):
+                # await bot.send_message(message.chat.id, "Ваша текущая конфигурация не подходит под вашу задачу, попробуйте поменять модель")
+                return
+        except Exception as e:
+            print(f"Error adding message: {e}")
+            await asyncio.sleep(time)
+            time *= 1.5
+
+    user_data["messages"].append((text, answer))
+    users.set(uid, user_data)
+    
+    parsed_ans = xml.parse_xml_like(answer)
+    builder = types.InlineKeyboardBuilder()
+    if parsed_ans.get("image", None) is not None:
+        img_url = await chat.imageGenerationAsync(
+            prompt=parsed_ans["image"], 
+            model=user_data["img_model"], 
+            resolution=(2000, 2000), 
+            filename=f"./runtime/images/answer_img_{token}.png"
+        )
+        results = [
+            types.InlineQueryResultPhoto(
+                id=str(uuid.uuid4()),  # Уникальный ID (до 64 байт)
+                photo_url=img_url,
+                reply_markup=builder.as_markup()
+            )
+        ]
+        await bot.answer_inline_query(inline_query.id, results=results, cache_time=1)
 
 @dp.message()
 async def handle_message(message: Message) -> None:
@@ -98,7 +151,7 @@ async def handle_message(message: Message) -> None:
                 
                 model_name = command.split(' ')[1]
                 if users.get(uid) is None:
-                    users.set(uid, {"base_model": "o3-mini", "img_model": "flux", "messages": []})
+                    users.set(uid, {"base_model": "gpt-4o-mini", "img_model": "flux", "messages": []})
 
                 if model_name in gpt.models_stock.ModelUtils.convert and not (model_name in gpt.image_models):
                     user_data = users.get(uid)
@@ -116,7 +169,7 @@ async def handle_message(message: Message) -> None:
                     return
                 
                 if users.get(uid) is None:
-                    users.set(uid, {"base_model": "o3-mini", "img_model": "flux", "messages": []})
+                    users.set(uid, {"base_model": "gpt-4o-mini", "img_model": "flux", "messages": []})
 
                 model_name = command.split(' ')[1]
                 if model_name in gpt.image_models:
@@ -129,14 +182,14 @@ async def handle_message(message: Message) -> None:
 
             if opcode == "stats":
                 if users.get(uid) is None:
-                    users.set(uid, {"base_model": "o3-mini", "img_model": "flux", "messages": []})
+                    users.set(uid, {"base_model": "gpt-4o-mini", "img_model": "flux", "messages": []})
                 
                 user_data = users.get(uid)
                 await bot.send_message(message.chat.id, f"Ваша статистика:\n\nОсновная (текстовая) модель: {user_data["base_model"]}\nМодель для изображений: {user_data["img_model"]}\nКоличество сообщений: {len(user_data["messages"])}")
 
         else:
             if users.get(uid) is None:
-                users.set(uid, {"base_model": "o3-mini", "img_model": "flux", "messages": []})
+                users.set(uid, {"base_model": "gpt-4o-mini", "img_model": "flux", "messages": []})
             
             user_data = users.get(uid)
             chat = gpt.Chat( provider=MAIN_PROVIDER, model=user_data["base_model"])
@@ -166,7 +219,7 @@ async def handle_message(message: Message) -> None:
                 img_url = await chat.imageGenerationAsync(
                     prompt=parsed_ans["image"], 
                     model=user_data["img_model"], 
-                    resolution=(1024, 1024), 
+                    resolution=(2000, 2000), 
                     filename=f"./runtime/images/answer_img_{token}.png"
                 )
                 await bot.send_photo(message.chat.id, img_url, caption=parsed_ans["answer"], parse_mode=None)
