@@ -2,6 +2,8 @@ import urllib
 import requests
 import enum
 
+voices = [ "alloy", "echo", "fable", "onyx", "nova", "shimmer", "coral", "verse", "ballad", "ash", "sage", "amuch", "dan" ]
+
 class Voice(enum.Enum):
     alloy = "alloy"
     echo = "echo"
@@ -20,8 +22,8 @@ class Voice(enum.Enum):
 def url_encode(text: str):
     return urllib.parse.quote(text)
 
-def gpt_tts(text: str, voice: Voice, output: str):
-    voice = voice.value
+def gpt_tts(text: str, voice: Voice | str, output: str):
+    voice = voice.value if isinstance(voice, Voice) else voice
     url = f"https://text.pollinations.ai/{url_encode(text)}?model=openai-audio&voice={voice}"
     response = requests.get(url)
     if 'audio/mpeg' in response.headers.get('Content-Type', ''):

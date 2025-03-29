@@ -56,6 +56,128 @@ def check_file(path: str) -> bool:
         print(f"Error while checking file {path}: {str(e)}")
         return False
 
+async def gpt_message_bot_proceed(token: str, voice_out: bool, uid: str, message: Message, text: str, images: list[str], files: list[str], retry: bool = False):
+    message_todel = await bot.send_message(message.chat.id, "В процессе ответа...")
+    if users.get(uid) is None:
+        users.set(uid, {"base_model": "gpt-4o-mini", "img_model": "flux", "messages": [], "voice": "ash"})
+    if users.get(uid).get("voice", None) is None:
+        data = users.get(uid)
+        data["voice"] = "ash"
+        users.set(uid, data)
+
+    user_data = users.get(uid)
+    chat = gpt.Chat( provider=MAIN_PROVIDER, model=user_data["base_model"])
+    chat.systemQuery = sys_prompt
+    chat.messages = user_data["messages"]
+    
+    if len(user_data["messages"]) == 0:
+        retry = False
+    
+    if retry:
+        text = user_data["messages"][-1][0]
+        del user_data["messages"][-1]
+
+    time = 1
+    while True:
+        try:
+            answer = await chat.addMessageAsync( query=text, images=images, text_files=files )
+            break
+        except gpt.g4f.errors.ResponseStatusError as e:
+            print(e)
+            if "500" in str(e):
+                await bot.send_message(message.chat.id, "Ваша текущая конфигурация не подходит под вашу задачу, попробуйте поменять модель")
+                return
+        except Exception as e:
+            print(f"Error adding message: {e}")
+            await asyncio.sleep(time)
+            time *= 1.5
+
+    user_data["messages"].append((text, answer))
+    users.set(uid, user_data)
+    
+    print(answer)
+    if answer.count("</answer>") == 0:
+        answer += "\n</answer>"
+        
+    parsed_ans = xml.parse_xml_like(answer)
+    if parsed_ans.get('answer', False) == False:
+        parsed_ans["answer"] = "Нет ответа"
+
+    if parsed_ans.get("image", None) is not None:
+        print(parsed_ans)
+        print(parsed_ans["resolution"].split())
+        time, tries = 1, 0
+        while True:
+            try:
+                img_url = await chat.imageGenerationAsync(
+                    prompt=parsed_ans["image"], 
+                    model=user_data["img_model"], 
+                    resolution=(int(parsed_ans["resolution"].split()[0]), int(parsed_ans["resolution"].split()[1])),
+                    specified_provider=gpt.provider_stock.PollinationsImage,
+                    filename=f"./runtime/images/answer_img_{token}.png" 
+                )
+                break
+            except Exception as e:
+                print(f"Error generating image: {e}")
+                await asyncio.sleep(time)
+                time *= 1.5
+                tries += 1
+                if tries >= 5:
+                    await bot.send_message(message.chat.id, "Не удалось выполнить генерацию. Попробуйте еще раз")
+        repl = f"**>{parsed_ans["image"]}||\n{parsed_ans["answer"]}"
+        try:
+            await bot.send_photo(message.chat.id, img_url, caption=md2esc(repl), parse_mode = ParseMode.MARKDOWN_V2)
+            if parsed_ans.get('file_img', False) != False:
+                print("File img:", parsed_ans.get('file_img', False))
+                imgfile = FSInputFile(f"./runtime/images/answer_img_{token}.png", filename="Generated Image")
+                await bot.send_document(message.chat.id, imgfile)
+        except Exception as e:
+            await bot.delete_message(message.chat.id, message_todel.message_id)
+            print(e)
+            if "caption is too long" in str(e):
+                await bot.send_photo(message.chat.id, img_url)
+                if parsed_ans.get('file_img', False) != False:
+                    imgfile = FSInputFile(f"./runtime/images/answer_img_{token}.png", filename="Generated Image")
+                    await bot.send_document(message.chat.id, imgfile)
+                await bot.send_message(message.chat.id, md2esc(repl), parse_mode = ParseMode.MARKDOWN_V2)
+                print(f"Error sending image: {e}")
+            elif "parse" in str(e):
+                await bot.send_photo(message.chat.id, img_url)
+                await bot.send_message(message.chat.id, f"Image prompt:\n{parsed_ans["image"]}\n\nAnswer: {parsed_ans["answer"]}")
+            else:
+                print(img_url)
+                await bot.send_message(message.chat.id, "Не удалось выполнить генерацию\\. Попробуйте еще раз", parse_mode=ParseMode.MARKDOWN_V2)
+        os.remove(f"./runtime/images/answer_img_{token}.png")
+    else:
+        await bot.delete_message(message.chat.id, message_todel.message_id)
+        if (not voice_out) and (parsed_ans.get("voice_out", False) == False):
+            try:
+                await message.reply(md2esc(parsed_ans["answer"]), parse_mode=ParseMode.MARKDOWN_V2)
+            except:
+                try:
+                    await message.reply(parsed_ans["answer"], parse_mode=ParseMode.MARKDOWN)
+                except:
+                    await message.reply(parsed_ans["answer"])
+        else:
+            try:
+                tts.gpt_tts(
+                    "Разговаривай натурально на русском языке (без какого-либо акцента). Скажи в ответ этот текст: " + parsed_ans["answer"],
+                    user_data["voice"],
+                    f"./runtime/voice_response_{token}.mp3"
+                )
+                await bot.send_voice(
+                    message.chat.id, FSInputFile(f"./runtime/voice_response_{token}.mp3")
+                )
+            except Exception as e:
+                print(f"Error while sending voice/synthesis of the voice response: {e}")
+                try:
+                    await message.reply(md2esc(parsed_ans["answer"]), parse_mode=ParseMode.MARKDOWN_V2)
+                except:
+                    try:
+                        await message.reply(parsed_ans["answer"], parse_mode=ParseMode.MARKDOWN)
+                    except:
+                        await message.reply(parsed_ans["answer"])
+
 @dp.message()
 async def handle_message(message: Message) -> None:
     global bot
@@ -122,6 +244,21 @@ async def handle_message(message: Message) -> None:
                 user_data["messages"] = []
                 users.set(uid, user_data)
 
+            if opcode == "voice":
+                if users.get(uid) is None:
+                    users.set(uid, {"base_model": "gpt-4o-mini", "img_model": "flux", "messages": [], "voice": "ash"})
+                
+                if len(command.split()) < 2:
+                    await bot.send_message(message.chat.id, "Недостаточно аргументов, вам нужно указать голосовую модель (/voices для списка)")
+                    return
+
+                user_data = users.get(uid)
+                if not command.split(' ')[1] in tts.voices:
+                    await bot.send_message(message.chat.id, f"Неверное имя голосового модели: {command.split(' ')[1]}")
+                    return
+                user_data["voice"] = command.split(' ')[1]
+                users.set(uid, user_data)
+
             if opcode == "model":
                 if len(command.split(' ')) < 2:
                     await bot.send_message(message.chat.id, "Недостаточно аргументов, вам нужно указать модель")
@@ -129,7 +266,7 @@ async def handle_message(message: Message) -> None:
                 
                 model_name = command.split(' ')[1]
                 if users.get(uid) is None:
-                    users.set(uid, {"base_model": "gpt-4o-mini", "img_model": "flux", "messages": []})
+                    users.set(uid, {"base_model": "gpt-4o-mini", "img_model": "flux", "messages": [], "voice": "ash"})
 
                 if model_name in gpt.models_stock.ModelUtils.convert and not (model_name in gpt.image_models):
                     user_data = users.get(uid)
@@ -141,13 +278,13 @@ async def handle_message(message: Message) -> None:
                 else:
                     await bot.send_message(message.chat.id, f"Нет модели с таким именем: {model_name}")
             
-            if opcode == "img_model":
+            if opcode == "imgm":
                 if len(command.split(' ')) < 2:
                     await bot.send_message(message.chat.id, "Недостаточно аргументов, вам нужно указать модель")
                     return
                 
                 if users.get(uid) is None:
-                    users.set(uid, {"base_model": "gpt-4o-mini", "img_model": "flux", "messages": []})
+                    users.set(uid, {"base_model": "gpt-4o-mini", "img_model": "flux", "messages": [], "voice": "ash"})
 
                 model_name = command.split(' ')[1]
                 if model_name in gpt.image_models:
@@ -160,122 +297,29 @@ async def handle_message(message: Message) -> None:
 
             if opcode == "stats":
                 if users.get(uid) is None:
-                    users.set(uid, {"base_model": "gpt-4o-mini", "img_model": "flux", "messages": []})
+                    users.set(uid, {"base_model": "gpt-4o-mini", "img_model": "flux", "messages": [], "voice": "ash"})
                 
                 user_data = users.get(uid)
                 await bot.send_message(message.chat.id, f"Ваша статистика:\n\nОсновная (текстовая) модель: {user_data["base_model"]}\nМодель для изображений: {user_data["img_model"]}\nКоличество сообщений: {len(user_data["messages"])}")
 
+            if opcode == "retry":
+                try:
+                    await gpt_message_bot_proceed(
+                        token, voice_out, uid, message, text, images, files, retry = True
+                    )
+                except Exception as e:
+                    print(f"Error in retry: {e}")
+                    await bot.send_message(message.chat.id, f"Произошла ошибка при повторной попытке. Можете попробовать еще раз или очистить контекст и попробовать еще раз.")
+                    return
         else:
-            message_todel = await bot.send_message(message.chat.id, "В процессе ответа...")
-            if users.get(uid) is None:
-                users.set(uid, {"base_model": "gpt-4o-mini", "img_model": "flux", "messages": []})
-            
-            user_data = users.get(uid)
-            chat = gpt.Chat( provider=MAIN_PROVIDER, model=user_data["base_model"])
-            chat.systemQuery = sys_prompt
-            chat.messages = user_data["messages"]
-            
-            time = 1
-            while True:
-                try:
-                    answer = await chat.addMessageAsync( query=text, images=images, text_files=files )
-                    break
-                except gpt.g4f.errors.ResponseStatusError as e:
-                    print(e)
-                    if "500" in str(e):
-                        await bot.send_message(message.chat.id, "Ваша текущая конфигурация не подходит под вашу задачу, попробуйте поменять модель")
-                        return
-                except Exception as e:
-                    print(f"Error adding message: {e}")
-                    await asyncio.sleep(time)
-                    time *= 1.5
-
-            user_data["messages"].append((text, answer))
-            users.set(uid, user_data)
-            
-            print(answer)
-            if answer.count("</answer>") == 0:
-                answer += "\n</answer>"
-                
-            parsed_ans = xml.parse_xml_like(answer)
-            if parsed_ans.get('answer', False) == False:
-                parsed_ans["answer"] = "Нет ответа"
-
-            if parsed_ans.get("image", None) is not None:
-                print(parsed_ans)
-                print(parsed_ans["resolution"].split())
-                time, tries = 1, 0
-                while True:
-                    try:
-                        img_url = await chat.imageGenerationAsync(
-                            prompt=parsed_ans["image"], 
-                            model=user_data["img_model"], 
-                            resolution=(int(parsed_ans["resolution"].split()[0]), int(parsed_ans["resolution"].split()[1])),
-                            specified_provider=gpt.provider_stock.PollinationsImage,
-                            filename=f"./runtime/images/answer_img_{token}.png" 
-                        )
-                        break
-                    except Exception as e:
-                        print(f"Error generating image: {e}")
-                        await asyncio.sleep(time)
-                        time *= 1.5
-                        tries += 1
-                        if tries >= 5:
-                            await bot.send_message(message.chat.id, "Не удалось выполнить генерацию. Попробуйте еще раз")
-                repl = f"**>{parsed_ans["image"]}||\n{parsed_ans["answer"]}"
-                try:
-                    await bot.send_photo(message.chat.id, img_url, caption=md2esc(repl), parse_mode = ParseMode.MARKDOWN_V2)
-                    if parsed_ans.get('file_img', False) != False:
-                        print("File img:", parsed_ans.get('file_img', False))
-                        imgfile = FSInputFile(f"./runtime/images/answer_img_{token}.png", filename="Generated Image")
-                        await bot.send_document(message.chat.id, imgfile)
-                except Exception as e:
-                    await bot.delete_message(message.chat.id, message_todel.message_id)
-                    print(e)
-                    if "caption is too long" in str(e):
-                        await bot.send_photo(message.chat.id, img_url)
-                        if parsed_ans.get('file_img', False) != False:
-                            imgfile = FSInputFile(f"./runtime/images/answer_img_{token}.png", filename="Generated Image")
-                            await bot.send_document(message.chat.id, imgfile)
-                        await bot.send_message(message.chat.id, md2esc(repl), parse_mode = ParseMode.MARKDOWN_V2)
-                        print(f"Error sending image: {e}")
-                    elif "parse" in str(e):
-                        await bot.send_photo(message.chat.id, img_url)
-                        await bot.send_message(message.chat.id, f"Image prompt:\n{parsed_ans["image"]}\n\nAnswer: {parsed_ans["answer"]}")
-                    else:
-                        print(img_url)
-                        await bot.send_message(message.chat.id, "Не удалось выполнить генерацию\\. Попробуйте еще раз", parse_mode=ParseMode.MARKDOWN_V2)
-                os.remove(f"./runtime/images/answer_img_{token}.png")
-            else:
-                await bot.delete_message(message.chat.id, message_todel.message_id)
-                if not voice_out:
-                    try:
-                        await message.reply(md2esc(parsed_ans["answer"]), parse_mode=ParseMode.MARKDOWN_V2)
-                    except:
-                        try:
-                            await message.reply(parsed_ans["answer"], parse_mode=ParseMode.MARKDOWN)
-                        except:
-                            await message.reply(parsed_ans["answer"])
-                else:
-                    try:
-                        tts.gpt_tts(
-                            "Разговаривай натурально на русском языке (без какого-либо акцента). Скажи в ответ этот текст: " + parsed_ans["answer"],
-                            tts.Voice.ash,
-                            f"./runtime/voice_response_{token}.mp3"
-                        )
-                        await bot.send_voice(
-                            message.chat.id, FSInputFile(f"./runtime/voice_response_{token}.mp3")
-                        )
-                    except Exception as e:
-                        print(f"Error while sending voice/synthesis of the voice response: {e}")
-                        try:
-                            await message.reply(md2esc(parsed_ans["answer"]), parse_mode=ParseMode.MARKDOWN_V2)
-                        except:
-                            try:
-                                await message.reply(parsed_ans["answer"], parse_mode=ParseMode.MARKDOWN)
-                            except:
-                                await message.reply(parsed_ans["answer"])
-            
+            try:
+                await gpt_message_bot_proceed(
+                    token, voice_out, uid, message, text, images, files, retry = False
+                )
+            except Exception as e:
+                print(f"Error in retry: {e}")
+                await bot.send_message(message.chat.id, f"Произошла ошибка при генерации. Можете попробовать еще раз или очистить контекст и попробовать еще раз.")
+                return
 
 @dp.inline_query()
 async def send_photo(inline_query: types.InlineQuery):
