@@ -102,6 +102,8 @@ async def gpt_message_bot_proceed(token: str, voice_out: bool, uid: str, message
     parsed_ans = xml.parse_xml_like(answer)
     if parsed_ans.get('answer', False) == False:
         parsed_ans["answer"] = "Нет ответа"
+    if parsed_ans.get('resolution', False) == False:
+        parsed_ans["resolution"] = "2000 2000"
 
     if parsed_ans.get("image", None) is not None:
         print(parsed_ans)
