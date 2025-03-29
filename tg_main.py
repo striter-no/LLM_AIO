@@ -194,7 +194,12 @@ async def handle_message(message: Message) -> None:
             users.set(uid, user_data)
             
             print(answer)
+            if answer.count("</answer>") == 0:
+                answer += "\n</answer>"
+                
             parsed_ans = xml.parse_xml_like(answer)
+            if parsed_ans.get('answer', False) == False:
+                parsed_ans["answer"] = "Нет ответа"
 
             if parsed_ans.get("image", None) is not None:
                 print(parsed_ans)
