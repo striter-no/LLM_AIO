@@ -12,7 +12,7 @@ def compile_system_request(data: dict):
     output += """Описание тегов для оформления. Каждый тег должен идти после другого, без вложенных. Используй данные теги при оформлении ответа:"""
     output += nl(10)
     for tag, (description, needed) in data["tags"].items():
-        output += f"`{tag}` ({"обязателен для использования" if needed else "опционален, используется по ситуации"}): {description}\n"
+        output += f"`{tag}` ({"ОБЯЗАТЕЛЕН для использования В ЛЮБОМ СЛУЧАЕ" if needed else "опционален, используется по ситуации"}): {description}\n"
     output += nl(10)
 
     print(output)

@@ -8,10 +8,14 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram import types
 
+from pydub import AudioSegment
+
 import src.sql_db as sql_db
 import src.xml_utils as xml
 import src.gpt as gpt
 import src.gpt_utils as gpt_utils
+import src.reco_voice as rv
+import src.openai_tts as tts
 
 import json as jn
 import asyncio
@@ -27,10 +31,15 @@ gptconf = jn.load(open("./configs/system_prompt.json"))
 sys_prompt = gpt_utils.compile_system_request(gptconf)
 
 msgsconf = jn.load(open("./configs/messages.json"))
-
 users = sql_db.DataBase("./databases/users.sqllite")
 
 MAIN_PROVIDER = gpt.provider_stock.PollinationsAI
+
+def ogg_to_wav(filename: str) -> str:
+    sound = AudioSegment.from_file(filename, format="ogg")
+    sound.export(f"{filename[:-4]}.wav", format="wav")
+    os.remove(filename)
+    return f"{filename[:-4]}.wav"
 
 def md2esc(target: str) -> str:
     simbs = ['(', ')', '~', '#', '+', '-', '=', '{', '}', '.', '!' ]
@@ -53,6 +62,7 @@ async def handle_message(message: Message) -> None:
 
     uid = message.from_user.id
     text = message.text or message.caption or "Запрос не предоставлен..."
+    voice_out = False
     token = str(uuid.uuid4())
     
     images = []
@@ -62,11 +72,16 @@ async def handle_message(message: Message) -> None:
     if message.document:
         file_id = message.document.file_id
         file_name = message.document.file_name
-        extension = ""
+        extension = "text"
     elif message.photo:
         file_id = message.photo[-1].file_id
         file_name = f"{file_id}.jpg"
-        extension = ".png"
+        extension = "img"
+    elif message.voice:
+        file_id = message.voice.file_id
+        file_name = f"{file_id}.ogg"
+        extension = "voice"
+        voice_out = True
     elif message.document is None and message.photo is None:
         pass
     else:
@@ -79,11 +94,15 @@ async def handle_message(message: Message) -> None:
         fpath = f"./runtime/userdata/{file_name}"
         await bot.download_file(api_path, fpath)
 
-        if extension == "":
+        if extension == "text":
             if (check_file(fpath)):
                 files.append(fpath)
-        elif extension == ".png":
+        elif extension == "img":
             images.append(fpath)
+        elif extension == "voice":
+            reco = rv.SpeechRecognition( "ru-RU", None )
+            text = reco.recognize_audio(ogg_to_wav(fpath))
+            print(text)
 
     if text:
         if text[0] == '/':
@@ -162,6 +181,7 @@ async def handle_message(message: Message) -> None:
                     answer = await chat.addMessageAsync( query=text, images=images, text_files=files )
                     break
                 except gpt.g4f.errors.ResponseStatusError as e:
+                    print(e)
                     if "500" in str(e):
                         await bot.send_message(message.chat.id, "Ваша текущая конфигурация не подходит под вашу задачу, попробуйте поменять модель")
                         return
@@ -201,6 +221,7 @@ async def handle_message(message: Message) -> None:
                 try:
                     await bot.send_photo(message.chat.id, img_url, caption=md2esc(repl), parse_mode = ParseMode.MARKDOWN_V2)
                     if parsed_ans.get('file_img', False) != False:
+                        print("File img:", parsed_ans.get('file_img', False))
                         imgfile = FSInputFile(f"./runtime/images/answer_img_{token}.png", filename="Generated Image")
                         await bot.send_document(message.chat.id, imgfile)
                 except Exception as e:
@@ -208,7 +229,7 @@ async def handle_message(message: Message) -> None:
                     print(e)
                     if "caption is too long" in str(e):
                         await bot.send_photo(message.chat.id, img_url)
-                        if not parsed_ans.get('file_img', False):
+                        if parsed_ans.get('file_img', False) != False:
                             imgfile = FSInputFile(f"./runtime/images/answer_img_{token}.png", filename="Generated Image")
                             await bot.send_document(message.chat.id, imgfile)
                         await bot.send_message(message.chat.id, md2esc(repl), parse_mode = ParseMode.MARKDOWN_V2)
@@ -222,14 +243,33 @@ async def handle_message(message: Message) -> None:
                 os.remove(f"./runtime/images/answer_img_{token}.png")
             else:
                 await bot.delete_message(message.chat.id, message_todel.message_id)
-                try:
-                    await message.reply(md2esc(parsed_ans["answer"]), parse_mode=ParseMode.MARKDOWN_V2)
-                except:
+                if not voice_out:
                     try:
-                        await message.reply(parsed_ans["answer"], parse_mode=ParseMode.MARKDOWN)
+                        await message.reply(md2esc(parsed_ans["answer"]), parse_mode=ParseMode.MARKDOWN_V2)
                     except:
-                        await message.reply(parsed_ans["answer"])
-            
+                        try:
+                            await message.reply(parsed_ans["answer"], parse_mode=ParseMode.MARKDOWN)
+                        except:
+                            await message.reply(parsed_ans["answer"])
+                else:
+                    try:
+                        tts.gpt_tts(
+                            "Разговаривай натурально на русском языке (без какого-либо акцента). Скажи в ответ этот текст: " + parsed_ans["answer"],
+                            tts.Voice.ash,
+                            f"./runtime/voice_response_{token}.mp3"
+                        )
+                        await bot.send_voice(
+                            message.chat.id, FSInputFile(f"./runtime/voice_response_{token}.mp3")
+                        )
+                    except Exception as e:
+                        print(f"Error while sending voice/synthesis of the voice response: {e}")
+                        try:
+                            await message.reply(md2esc(parsed_ans["answer"]), parse_mode=ParseMode.MARKDOWN_V2)
+                        except:
+                            try:
+                                await message.reply(parsed_ans["answer"], parse_mode=ParseMode.MARKDOWN)
+                            except:
+                                await message.reply(parsed_ans["answer"])
             
 
 @dp.inline_query()

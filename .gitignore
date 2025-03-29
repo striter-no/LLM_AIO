@@ -3,5 +3,4 @@ __pycache__
 .vscode
 dev
 databases/*
-runtime/images/*
-runtime/userdata/*
+runtime/*
