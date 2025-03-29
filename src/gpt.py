@@ -66,6 +66,7 @@ class Chat:
         url = img_resp.data[0].url
         
         if not url.startswith("http"):
+            print(url)
             raise ValueError("Invalid image URL")
 
         # Save image

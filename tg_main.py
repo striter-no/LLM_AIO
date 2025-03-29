@@ -11,17 +11,21 @@ from aiogram import types
 import src.sql_db as sql_db
 import src.xml_utils as xml
 import src.gpt as gpt
+import src.gpt_utils as gpt_utils
 
 import json as jn
 import asyncio
 import random
 import uuid
+import os
 
 dp = Dispatcher()
 bot: Bot = None;
 
 tgconf = jn.load(open("./configs/dev/bot_cfg.json"))
 gptconf = jn.load(open("./configs/system_prompt.json"))
+sys_prompt = gpt_utils.compile_system_request(gptconf)
+
 msgsconf = jn.load(open("./configs/messages.json"))
 
 users = sql_db.DataBase("./databases/users.sqllite")
@@ -48,8 +52,8 @@ async def handle_message(message: Message) -> None:
     global bot
 
     uid = message.from_user.id
-    text = message.text or message.caption
-    token = random.randint(0, 10000)
+    text = message.text or message.caption or "Запрос не предоставлен..."
+    token = str(uuid.uuid4())
     
     images = []
     files  = []
@@ -87,9 +91,9 @@ async def handle_message(message: Message) -> None:
             opcode = command.split(' ')[0]
 
             if opcode in msgsconf["commands"]:
-                await message.reply(msgsconf["commands"][opcode])
+                await message.reply(msgsconf["commands"][opcode], parse_mode=ParseMode.MARKDOWN)
             else:
-                await message.reply(msgsconf["commands"]["unknown"])
+                await message.reply(msgsconf["commands"]["unknown"], parse_mode=ParseMode.MARKDOWN)
 
             if opcode == "clear":
                 if users.get(uid) is None:
@@ -149,7 +153,7 @@ async def handle_message(message: Message) -> None:
             
             user_data = users.get(uid)
             chat = gpt.Chat( provider=MAIN_PROVIDER, model=user_data["base_model"])
-            chat.systemQuery = gptconf["general"]
+            chat.systemQuery = sys_prompt
             chat.messages = user_data["messages"]
             
             time = 1
@@ -169,32 +173,62 @@ async def handle_message(message: Message) -> None:
             user_data["messages"].append((text, answer))
             users.set(uid, user_data)
             
-            # print(answer)
+            print(answer)
             parsed_ans = xml.parse_xml_like(answer)
 
             if parsed_ans.get("image", None) is not None:
-                # print(parsed_ans)
-                img_url = await chat.imageGenerationAsync(
-                    prompt=parsed_ans["image"], 
-                    model=user_data["img_model"], 
-                    resolution=(2000, 2000),
-                    specified_provider=gpt.provider_stock.PollinationsImage,
-                    filename=f"./runtime/images/answer_img_.png" # {token}
-                )
+                print(parsed_ans)
+                print(parsed_ans["resolution"].split())
+                time, tries = 1, 0
+                while True:
+                    try:
+                        img_url = await chat.imageGenerationAsync(
+                            prompt=parsed_ans["image"], 
+                            model=user_data["img_model"], 
+                            resolution=(int(parsed_ans["resolution"].split()[0]), int(parsed_ans["resolution"].split()[1])),
+                            specified_provider=gpt.provider_stock.PollinationsImage,
+                            filename=f"./runtime/images/answer_img_{token}.png" 
+                        )
+                        break
+                    except Exception as e:
+                        print(f"Error generating image: {e}")
+                        await asyncio.sleep(time)
+                        time *= 1.5
+                        tries += 1
+                        if tries >= 5:
+                            await bot.send_message(message.chat.id, "Не удалось выполнить генерацию. Попробуйте еще раз")
                 repl = f"**>{parsed_ans["image"]}||\n{parsed_ans["answer"]}"
                 try:
                     await bot.send_photo(message.chat.id, img_url, caption=md2esc(repl), parse_mode = ParseMode.MARKDOWN_V2)
+                    if parsed_ans.get('file_img', False) != False:
+                        imgfile = FSInputFile(f"./runtime/images/answer_img_{token}.png", filename="Generated Image")
+                        await bot.send_document(message.chat.id, imgfile)
                 except Exception as e:
                     await bot.delete_message(message.chat.id, message_todel.message_id)
-                    
+                    print(e)
                     if "caption is too long" in str(e):
                         await bot.send_photo(message.chat.id, img_url)
+                        if not parsed_ans.get('file_img', False):
+                            imgfile = FSInputFile(f"./runtime/images/answer_img_{token}.png", filename="Generated Image")
+                            await bot.send_document(message.chat.id, imgfile)
                         await bot.send_message(message.chat.id, md2esc(repl), parse_mode = ParseMode.MARKDOWN_V2)
                         print(f"Error sending image: {e}")
+                    elif "parse" in str(e):
+                        await bot.send_photo(message.chat.id, img_url)
+                        await bot.send_message(message.chat.id, f"Image prompt:\n{parsed_ans["image"]}\n\nAnswer: {parsed_ans["answer"]}")
                     else:
+                        print(img_url)
                         await bot.send_message(message.chat.id, "Не удалось выполнить генерацию\\. Попробуйте еще раз", parse_mode=ParseMode.MARKDOWN_V2)
+                os.remove(f"./runtime/images/answer_img_{token}.png")
             else:
-                await message.reply(md2esc(parsed_ans["answer"]), parse_mode=ParseMode.MARKDOWN_V2)
+                await bot.delete_message(message.chat.id, message_todel.message_id)
+                try:
+                    await message.reply(md2esc(parsed_ans["answer"]), parse_mode=ParseMode.MARKDOWN_V2)
+                except:
+                    try:
+                        await message.reply(parsed_ans["answer"], parse_mode=ParseMode.MARKDOWN)
+                    except:
+                        await message.reply(parsed_ans["answer"])
             
             
 
@@ -264,9 +298,11 @@ async def send_photo(inline_query: types.InlineQuery):
         except Exception as e:
             print(f"Error sending inline query: {e}")
 
+    
+
 async def main() -> None:
     global bot
-    bot = Bot(token=tgconf["API_KEY"], default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
+    bot = Bot(token=tgconf["API_KEY"], default=DefaultBotProperties())
     print("Started")
     await dp.start_polling(bot)
     
