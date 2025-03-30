@@ -6,7 +6,7 @@ def compile_response(data: dict):
         output += f"<{key}>\n{value}\n</{key}>\n"
     return output
 
-def compile_system_request(data: dict):
+def compile_system_request(data: dict, only_tags: list[str] | None = None):
     nl = lambda x: f"\n{'='*x}\n\n"
 
     output  = "General request:" + nl(10) + data["general"] + nl(10)
@@ -20,7 +20,9 @@ def compile_system_request(data: dict):
     output += """Описание тегов для оформления. Каждый тег должен идти после другого, без вложенных. Используй данные теги при оформлении ответа:"""
     output += nl(10)
     for tag, (description, needed) in data["tags"].items():
-        output += f"`{tag}` ({"ОБЯЗАТЕЛЕН для использования В ЛЮБОМ СЛУЧАЕ" if needed else "опционален, используется по ситуации"}): {description}\n"
+        if (only_tags and tag in only_tags) or (only_tags is None):
+            output += f"`{tag}` ({"ОБЯЗАТЕЛЕН для использования В ЛЮБОМ СЛУЧАЕ" if needed else "опционален, используется по ситуации"}): {description}\n"
+
     output += nl(10)
 
     output += "Запросы и примеры оформления твоих ответов на них с тегами:" + nl(10)
@@ -29,6 +31,15 @@ def compile_system_request(data: dict):
 
     # print(output)
     return output
+
+def get_chains(data):
+    json_data = data.split('\n\n')
+    chains = []
+    for chain in json_data:
+        chain_data = json.loads(chain.strip())
+        chains.append(chain_data)
+    
+    return chains
 
 if __name__ == "__main__":
     gptconf = json.load(open("./configs/system_prompt.json"))

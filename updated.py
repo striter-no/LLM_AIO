@@ -25,7 +25,7 @@ import asyncio
 import random
 import enum
 import uuid
-import os
+import os, re
 
 class Utils:
     @staticmethod
@@ -37,10 +37,11 @@ class Utils:
 
     @staticmethod
     def md2esc(target: str) -> str:
-        simbs = ['(', ')', '#', '+', '-', '=', '{', '}', '.', '!' ]
-        for i in simbs:
-            target = target.replace(i, f'\\{i}')
-        return target
+        simbs = ['(', ')', '#', '+', '-', '=', '{', '}', '.', '!', '<', '>', '|']
+        # Create a regex pattern to match characters that need escaping
+        pattern = r'(?<!\\)(' + '|'.join(map(re.escape, simbs)) + ')'
+        # Replace with escaped characters
+        return re.sub(pattern, r'\\\1', target)
 
     @staticmethod
     def check_file(path: str) -> bool:
@@ -72,6 +73,9 @@ class Configs:
 
         self.exclude_conf_answ = exclude_conf_answ
         self.users = sql_db.DataBase(user_database)
+
+        self.enhances = self.gpt["enhances"]
+        self.side_prompts = self.gpt["side-sys-prompts"]
         self.system_prompt = gpt_utils.compile_system_request(self.gpt)
 
 class UserDatabase:
@@ -274,12 +278,16 @@ class TelegramApp:
                 await self.bot_send_text(chat_id, caption)
 
     async def bot_send_text(self, chat_id: int, text: str) -> None:
+        if not (text and len(text) > 0):
+            return
         try:
             await self.bot.send_message(chat_id, text, parse_mode=ParseMode.MARKDOWN_V2)
-        except:
+        except Exception as ex:
+            print(f"Error sending message in MD2 format: {ex}")
             try:
                 await self.bot.send_message(chat_id, text, parse_mode=ParseMode.MARKDOWN)
-            except:
+            except Exception as ex2:
+                print(f"Error sending message in MD format: {ex2}")
                 await self.bot.send_message(chat_id, text)
 
     async def bot_document(self, chat_id, documentpath: str, docname: str, caption: str | None = None):
@@ -369,7 +377,46 @@ class TelegramApp:
 
         return out
 
+    async def side_ask(self, uid: int, request: str, system_prompt: str, req_type: str = "text", images: list[str] = [], files: list[str] = []) -> tuple[bool, str]:
+        gptapp = GPTApp(
+            text_model = self.userdb.get(uid, 'base_model'),
+            img_model = self.userdb.get(uid, 'img_model'),
+            configs = self.configs,
+            userdb = self.userdb
+        )
+        gptapp.load_messages(uid)
+        gptapp.chat.setSystemQuery(system_prompt)
+
+        if req_type == "text":
+            return await gptapp.text_query(request, images, files)
+
+    async def enhance_ask(self, uid: int, prompt: str, enhance_type: str, chat_id: int, gptapp: GPTApp):
+        print(f"[gpt_section][enhance] Enhanceing {enhance_type}")
+        sys_prompt = gpt_utils.compile_system_request(
+            self.configs.gpt, ["answer"]
+        ) + '\n\n' + self.configs.side_prompts["enhance"]
+
+        print(f"[gpt_section][enhance] Side-System prompt:\n {'='*20}\n{sys_prompt}\n{'='*20}")
+        print(f"[gpt_section][enhance] Side-System prompt generated...")
+
+        side_status, raw_side = await self.side_ask(
+            uid,
+            self.configs.enhances[enhance_type].replace("[PLACE HERE QUESTION]", prompt),
+            sys_prompt,
+            req_type = "text"
+        )
+        if not side_status:
+            print(f"[{uid}][gpt_section][{enhance_type}] Error while enhancing {enhance_type}")
+            await self.bot_send_text(chat_id = chat_id, text = "Произошла ошибка при улучшении изображения. Попробуйте еще раз")
+            return
+        raw_parsed = gptapp.parse_answer(raw_side)
+        print(raw_side)
+        print(f"[gpt_section][enhance] Parsed answer: {raw_parsed}")
+        answer = raw_parsed["answer"]
+        return answer, raw_parsed
+
     async def gpt_answer(self, token: str, uid: int, chat_id: int, request: str, files: list[str], imgs: list[str]) -> None:
+        pre_answer = ""
         gptapp = GPTApp(
             text_model = self.userdb.get(uid, 'base_model'),
             img_model = self.userdb.get(uid, 'img_model'),
@@ -386,11 +433,6 @@ class TelegramApp:
             await self.bot_send_text(chat_id, text = "Произошла ошибка во время генерации текста. Попробуйте еще раз")
             return
         
-        print(f"[{uid}][gpt_section] Adding new message to the context")
-        messages = self.userdb.get(uid, "messages")
-        messages.append((request, raw_answer))
-        self.userdb.set(uid, "messages", messages)
-
         try:
             print(f"[{uid}][gpt_section][try] Parsing response")
             parsed = gptapp.parse_answer(raw_answer)
@@ -399,20 +441,39 @@ class TelegramApp:
             print(f"[{uid}][gpt_section][except] Error in parsing answer: {e}\n============\n\n{raw_answer}\n\n============")
             await self.bot_send_text(chat_id = chat_id, text = "Произошла ошибка при парсинге ответа. Попробуйте еще раз")
             return
+        
+
+        if parsed.get("thinking", None) is not None or parsed.get("enhance", None) is not None and parsed.get("enhance", None) == "thinking":
+            raw_answer, r_parsed = await self.enhance_ask(uid, request, "thinking", chat_id, gptapp)
+
+            for chain in gpt_utils.get_chains(r_parsed["thinking"]):
+                pre_answer += chain["title"] + '\n\n' + chain["content"] + '\n--------------\n'
+
+        print(f"[{uid}][gpt_section] Adding new message to the context")
+        messages = self.userdb.get(uid, "messages")
+        messages.append((request, parsed["answer"]))
+        self.userdb.set(uid, "messages", messages)
+
+        
 
         if parsed.get("image", None) is not None:
             width, height = parsed.get("resolution").split(' ')
             print(f"[{uid}][gpt_section][image] Generating image: {width}x{height}")
+            prompt = parsed.get("image")
+
+            if parsed.get("enhance", None) is not None:
+                prompt = await self.enhance_ask(uid, prompt, "image", chat_id, gptapp)
+
             await self.bot.edit_message_text(chat_id = chat_id, message_id = message_todel.message_id, text="Генерация изображения...")
             print(f"[{uid}][gpt_section][query] Asking for generation")
             status, imgurl = await gptapp.image_query( 
-                parsed.get("image"), 
+                prompt, 
                 int(width), int(height), 
                 f"./runtime/images/answer_img_{token}.jpg"
             )
             print(f"[{uid}][gpt_section][image] Ready")
-            repl = f"**>{Utils.md2esc(parsed["image"]).replace('\n', '\n>')}||\n{Utils.md2esc(parsed["answer"])}"
-            if status: 
+            repl = f"**>{Utils.md2esc(prompt).replace('\n', '\n>')}||\n{Utils.md2esc(parsed["answer"])}"
+            if status:
                 print(f"[{uid}][gpt_section][image] Successfully")
                 await self.bot_image(chat_id = chat_id, caption = repl, imgurl = imgurl)
                 if parsed.get("file_img", False) != False:
@@ -432,7 +493,8 @@ class TelegramApp:
                 await self.bot_voice(chat_id, f"./runtime/voice_{token}.mp3", uid, parsed["answer"])
             else:
                 print(f"[{uid}][gpt_section][text] Sending text message...")
-                await self.bot_send_text(chat_id = chat_id, text = parsed["answer"] )
+                repl = f"**>{Utils.md2esc(pre_answer).replace('\n', '\n>')}||" + '\n' + Utils.md2esc(parsed["answer"])
+                await self.bot_send_text(chat_id = chat_id, text = repl )
 
         print(f"[{uid}][gpt_section][msg_handler] Deleting temporary message")
         await self.bot.delete_message(chat_id, message_todel.message_id)
@@ -493,7 +555,6 @@ class TelegramApp:
 
         print(f"[{uid}][msg_handler] Entering GPT regular section")
         await self.gpt_answer(token, uid, chat_id, f"Request type: {extension}\n\nRequest: {text}", files, images)
-        
 
 if __name__ == "__main__":
     config = Configs(
