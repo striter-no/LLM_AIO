@@ -17,6 +17,8 @@ import src.gpt_utils as gpt_utils
 import src.reco_voice as rv
 import src.openai_tts as tts
 
+import datetime as dtm
+import time as modtime
 import json as jn
 import asyncio
 import random
@@ -42,7 +44,7 @@ def ogg_to_wav(filename: str) -> str:
     return f"{filename[:-4]}.wav"
 
 def md2esc(target: str) -> str:
-    simbs = ['(', ')', '~', '#', '+', '-', '=', '{', '}', '.', '!' ]
+    simbs = ['(', ')', '#', '+', '-', '=', '{', '}', '.', '!' ]
     for i in simbs:
         target = target.replace(i, f'\\{i}')
     return target
@@ -57,9 +59,13 @@ def check_file(path: str) -> bool:
         return False
 
 async def gpt_message_bot_proceed(token: str, voice_out: bool, uid: str, message: Message, text: str, images: list[str], files: list[str], retry: bool = False):
-    message_todel = await bot.send_message(message.chat.id, "В процессе ответа...")
-    if users.get(uid) is None:
-        users.set(uid, {"base_model": "gpt-4o-mini", "img_model": "flux", "messages": [], "voice": "ash"})
+    if message is None:
+        return
+    
+    chat_id = message.chat.id if isinstance(message, Message) else message
+    message_id = message.message_id if isinstance(message, Message) else None
+
+    message_todel = await bot.send_message(chat_id, "В процессе ответа...") if isinstance(message, Message) else None
     if users.get(uid).get("voice", None) is None:
         data = users.get(uid)
         data["voice"] = "ash"
@@ -96,9 +102,12 @@ async def gpt_message_bot_proceed(token: str, voice_out: bool, uid: str, message
     users.set(uid, user_data)
     
     print(answer)
+    if answer.count("<answer>") == 0:
+        answer = "<answer>" + "\n" + answer
+
     if answer.count("</answer>") == 0:
         answer += "\n</answer>"
-        
+
     parsed_ans = xml.parse_xml_like(answer)
     if parsed_ans.get('answer', False) == False:
         parsed_ans["answer"] = "Нет ответа"
@@ -125,41 +134,42 @@ async def gpt_message_bot_proceed(token: str, voice_out: bool, uid: str, message
                 time *= 1.5
                 tries += 1
                 if tries >= 5:
-                    await bot.send_message(message.chat.id, "Не удалось выполнить генерацию. Попробуйте еще раз")
-        repl = f"**>{parsed_ans["image"]}||\n{parsed_ans["answer"]}"
+                    await bot.send_message(chat_id, "Не удалось выполнить генерацию. Попробуйте еще раз")
+        repl = f"**>{md2esc(parsed_ans["image"]).replace('\n', '\n>')}||\n{md2esc(parsed_ans["answer"])}"
         try:
-            await bot.send_photo(message.chat.id, img_url, caption=md2esc(repl), parse_mode = ParseMode.MARKDOWN_V2)
+            if message_todel: await bot.delete_message(chat_id, message_todel.message_id)
+            await bot.send_photo(chat_id, img_url, caption=md2esc(repl), parse_mode = ParseMode.MARKDOWN_V2)
             if parsed_ans.get('file_img', False) != False:
                 print("File img:", parsed_ans.get('file_img', False))
                 imgfile = FSInputFile(f"./runtime/images/answer_img_{token}.png", filename="Generated Image")
-                await bot.send_document(message.chat.id, imgfile)
+                await bot.send_document(chat_id, imgfile)
         except Exception as e:
-            await bot.delete_message(message.chat.id, message_todel.message_id)
+            if message_todel: await bot.delete_message(chat_id, message_todel.message_id)
             print(e)
             if "caption is too long" in str(e):
-                await bot.send_photo(message.chat.id, img_url)
+                await bot.send_photo(chat_id, img_url)
                 if parsed_ans.get('file_img', False) != False:
                     imgfile = FSInputFile(f"./runtime/images/answer_img_{token}.png", filename="Generated Image")
-                    await bot.send_document(message.chat.id, imgfile)
-                await bot.send_message(message.chat.id, md2esc(repl), parse_mode = ParseMode.MARKDOWN_V2)
+                    await bot.send_document(chat_id, imgfile)
+                await bot.send_message(chat_id, md2esc(repl), parse_mode = ParseMode.MARKDOWN_V2)
                 print(f"Error sending image: {e}")
             elif "parse" in str(e):
-                await bot.send_photo(message.chat.id, img_url)
-                await bot.send_message(message.chat.id, f"Image prompt:\n{parsed_ans["image"]}\n\nAnswer: {parsed_ans["answer"]}")
+                await bot.send_photo(chat_id, img_url)
+                await bot.send_message(chat_id, f"Image prompt:\n{parsed_ans["image"]}\n\nAnswer: {parsed_ans["answer"]}")
             else:
                 print(img_url)
-                await bot.send_message(message.chat.id, "Не удалось выполнить генерацию\\. Попробуйте еще раз", parse_mode=ParseMode.MARKDOWN_V2)
+                await bot.send_message(chat_id, "Не удалось выполнить генерацию\\. Попробуйте еще раз", parse_mode=ParseMode.MARKDOWN_V2)
         os.remove(f"./runtime/images/answer_img_{token}.png")
     else:
-        await bot.delete_message(message.chat.id, message_todel.message_id)
+        if message_todel: await bot.delete_message(chat_id, message_todel.message_id)
         if (not voice_out) and (parsed_ans.get("voice_out", False) == False):
             try:
-                await message.reply(md2esc(parsed_ans["answer"]), parse_mode=ParseMode.MARKDOWN_V2)
+                await bot.send_message(chat_id, md2esc(parsed_ans["answer"]), parse_mode=ParseMode.MARKDOWN_V2)
             except:
                 try:
-                    await message.reply(parsed_ans["answer"], parse_mode=ParseMode.MARKDOWN)
+                    await bot.send_message(chat_id, parsed_ans["answer"], parse_mode=ParseMode.MARKDOWN)
                 except:
-                    await message.reply(parsed_ans["answer"])
+                    await bot.send_message(chat_id, parsed_ans["answer"])
         else:
             try:
                 tts.gpt_tts(
@@ -168,17 +178,25 @@ async def gpt_message_bot_proceed(token: str, voice_out: bool, uid: str, message
                     f"./runtime/voice_response_{token}.mp3"
                 )
                 await bot.send_voice(
-                    message.chat.id, FSInputFile(f"./runtime/voice_response_{token}.mp3")
+                    chat_id, FSInputFile(f"./runtime/voice_response_{token}.mp3")
                 )
+                if user_data["voice_descript"]:
+                    out_str = f"**>{md2esc(parsed_ans["answer"]).replace('\n', '\n>')} ||"
+                    print(out_str)
+                    await bot.send_message(chat_id, out_str, parse_mode=ParseMode.MARKDOWN_V2)
+                os.remove(f"./runtime/voice_response_{token}.mp3")
             except Exception as e:
                 print(f"Error while sending voice/synthesis of the voice response: {e}")
                 try:
-                    await message.reply(md2esc(parsed_ans["answer"]), parse_mode=ParseMode.MARKDOWN_V2)
+                    if message_id: await message.reply(md2esc(parsed_ans["answer"]), parse_mode=ParseMode.MARKDOWN_V2)
+                    else: await bot.send_message(chat_id, md2esc(parsed_ans["answer"]), parse_mode=ParseMode.MARKDOWN_V2)
                 except:
                     try:
-                        await message.reply(parsed_ans["answer"], parse_mode=ParseMode.MARKDOWN)
+                        if message_id: await message.reply(parsed_ans["answer"], parse_mode=ParseMode.MARKDOWN)
+                        else: await bot.send_message(chat_id, parsed_ans["answer"], parse_mode=ParseMode.MARKDOWN)
                     except:
-                        await message.reply(parsed_ans["answer"])
+                        if message_id: await message.reply(parsed_ans["answer"])
+                        else: await bot.send_message(chat_id, parsed_ans["answer"])
 
 @dp.message()
 async def handle_message(message: Message) -> None:
@@ -188,6 +206,29 @@ async def handle_message(message: Message) -> None:
     text = message.text or message.caption or "Запрос не предоставлен..."
     voice_out = False
     token = str(uuid.uuid4())
+    
+    if users.get(uid) is None:
+        users.set(uid, {"base_model": "gpt-4o-mini", "img_model": "flux", "messages": [], "voice": "ash", "voice_descript": False, "last_activity": modtime.time(), "user_id": message.from_user.id, "remind_time": "6"})
+
+    if users.get(uid).get("voice_descript", None) is None:
+        data = users.get(uid)
+        data["voice_descript"] = False
+        users.set(uid, data)
+    
+    if users.get(uid).get("last_activity", None) is None:
+        data = users.get(uid)
+        data["last_activity"] = modtime.time()
+        users.set(uid, data)
+    
+    if users.get(uid).get("user_id", None) is None:
+        data = users.get(uid)
+        data["user_id"] = message.from_user.id
+        users.set(uid, data)
+    
+    if users.get(uid).get("remind_time", None) is None:
+        data = users.get(uid)
+        data["remind_time"] = "6"
+        users.set(uid, data)
     
     images = []
     files  = []
@@ -225,30 +266,46 @@ async def handle_message(message: Message) -> None:
             images.append(fpath)
         elif extension == "voice":
             reco = rv.SpeechRecognition( "ru-RU", None )
-            text = reco.recognize_audio(ogg_to_wav(fpath))
+            text = reco.recognize_audiofile(ogg_to_wav(fpath))
+            user_data = users.get(uid)
+            if user_data["voice_descript"]:
+                await message.reply(f"**>{md2esc(text).replace('\n', '\n>')}||", parse_mode=ParseMode.MARKDOWN_V2)
             print(text)
 
     if text:
         if text[0] == '/':
-            command = text[1:].lower()
+            command = text[1:]
             opcode = command.split(' ')[0]
 
-            if opcode in msgsconf["commands"]:
-                await message.reply(msgsconf["commands"][opcode], parse_mode=ParseMode.MARKDOWN)
-            else:
-                await message.reply(msgsconf["commands"]["unknown"], parse_mode=ParseMode.MARKDOWN)
+            if not (opcode in ["voicedesc", "remindt"]):
+                if opcode in msgsconf["commands"]:
+                    await message.reply(msgsconf["commands"][opcode], parse_mode=ParseMode.MARKDOWN)
+                else:
+                    await message.reply(msgsconf["commands"]["unknown"], parse_mode=ParseMode.MARKDOWN)
+
+            if opcode == "remindt":
+                if len(command.split()) < 2:
+                    await bot.send_message(message.chat.id, "Недостаточно аргументов, вам нужно указать время напоминания")
+                
+                remind_time = command.split(' ')[1]
+                user_data = users.get(uid)
+                user_data["remind_time"] = remind_time
+                users.set(uid, user_data)
+
+                await message.reply(f"Напоминание установлено на {remind_time} часов", parse_mode=ParseMode.MARKDOWN)
+
+            if opcode == "voicedesc":
+                user_data = users.get(uid)
+                user_data["voice_descript"] = not user_data["voice_descript"]
+                users.set(uid, user_data)
+                await message.reply(f"Расшифровка голосовых: {'включено' if user_data['voice_descript'] else 'выключено'}", parse_mode=ParseMode.MARKDOWN)
 
             if opcode == "clear":
-                if users.get(uid) is None:
-                    await bot.send_message(message.chat.id, "Еще нет контекста для очистки")
-                    return
                 user_data = users.get(uid)
                 user_data["messages"] = []
                 users.set(uid, user_data)
 
             if opcode == "voice":
-                if users.get(uid) is None:
-                    users.set(uid, {"base_model": "gpt-4o-mini", "img_model": "flux", "messages": [], "voice": "ash"})
                 
                 if len(command.split()) < 2:
                     await bot.send_message(message.chat.id, "Недостаточно аргументов, вам нужно указать голосовую модель (/voices для списка)")
@@ -267,8 +324,6 @@ async def handle_message(message: Message) -> None:
                     return
                 
                 model_name = command.split(' ')[1]
-                if users.get(uid) is None:
-                    users.set(uid, {"base_model": "gpt-4o-mini", "img_model": "flux", "messages": [], "voice": "ash"})
 
                 if model_name in gpt.models_stock.ModelUtils.convert and not (model_name in gpt.image_models):
                     user_data = users.get(uid)
@@ -285,8 +340,6 @@ async def handle_message(message: Message) -> None:
                     await bot.send_message(message.chat.id, "Недостаточно аргументов, вам нужно указать модель")
                     return
                 
-                if users.get(uid) is None:
-                    users.set(uid, {"base_model": "gpt-4o-mini", "img_model": "flux", "messages": [], "voice": "ash"})
 
                 model_name = command.split(' ')[1]
                 if model_name in gpt.image_models:
@@ -298,8 +351,6 @@ async def handle_message(message: Message) -> None:
                     await bot.send_message(message.chat.id, f"Нет модели с таким именем: {model_name}")
 
             if opcode == "stats":
-                if users.get(uid) is None:
-                    users.set(uid, {"base_model": "gpt-4o-mini", "img_model": "flux", "messages": [], "voice": "ash"})
                 
                 user_data = users.get(uid)
                 await bot.send_message(message.chat.id, f"Ваша статистика:\n\nОсновная (текстовая) модель: {user_data["base_model"]}\nМодель для изображений: {user_data["img_model"]}\nКоличество сообщений: {len(user_data["messages"])}")
@@ -319,9 +370,15 @@ async def handle_message(message: Message) -> None:
                     token, voice_out, uid, message, text, images, files, retry = False
                 )
             except Exception as e:
-                print(f"Error in retry: {e}")
+                print(f"Error while generating answer: {e}")
                 await bot.send_message(message.chat.id, f"Произошла ошибка при генерации. Можете попробовать еще раз или очистить контекст и попробовать еще раз.")
                 return
+
+async def update_state():
+    while True:
+        with open("./runtime/aiogram_main.txt", "w") as f:
+            f.write(f"{modtime.time()}")
+        await asyncio.sleep(5)
 
 @dp.inline_query()
 async def send_photo(inline_query: types.InlineQuery):
@@ -389,11 +446,57 @@ async def send_photo(inline_query: types.InlineQuery):
         except Exception as e:
             print(f"Error sending inline query: {e}")
 
-    
+async def check_old_users():
+    while True:
+        non_old = []
+        for uid in users.all():
+            user_data = users.get(uid)
+            if user_data and not (None in (user_data.get("last_activity", None), user_data.get("remind_time", None))):
+                # print(f"Checking user {uid}: {user_data["last_activity"]}")
+                if modtime.time() - user_data["last_activity"] > 60 * 60 * float(user_data["remind_time"]):
+                    print(f"Old user {uid}: {user_data["last_activity"]}")
+                    # try:
+                    await gpt_message_bot_proceed(
+                        token = str(uuid.uuid4()), 
+                        voice_out = False, 
+                        uid = user_data.get("user_id", None),
+                        message = user_data.get("user_id", None),
+                        images = [],
+                        files = [],
+                        retry = False,
+                        text = "Напиши какой-нибудь краткий вопрос или предложение вне контекста, как будто ты пишешь в давнюю переписку снова"
+                    )
+                    non_old.append(uid)
+                    
+                    # except Exception as e:
+                    #     print(f"Error in old user cleanup: {e} ({uid} {user_data["user_id"]})")
+                    # await bot.send_message(user_data["user_id"], )
+            else:
+                if user_data.get("last_activity", None) is None:
+                    data = users.get(uid)
+                    data["last_activity"] = modtime.time()
+                    users.set(uid, data)
+                
+                if users.get(uid).get("remind_time", None) is None:
+                    data = users.get(uid)
+                    data["remind_time"] = "6"
+                    users.set(uid, data)
+
+        for uid in non_old:
+            data = users.get(uid)
+            data["last_activity"] = modtime.time()
+            users.set(uid, data)
+
+        await asyncio.sleep(60)
+
+async def on_startup():
+    asyncio.create_task(check_old_users())
+    asyncio.create_task(update_state())
 
 async def main() -> None:
     global bot
-    bot = Bot(token=tgconf["API_KEY"], default=DefaultBotProperties())
+    await on_startup()
+    bot = Bot(token=tgconf["API_KEY"], default=DefaultBotProperties(link_preview_is_disabled=True))
     print("Started")
     await dp.start_polling(bot)
     

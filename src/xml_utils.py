@@ -1,7 +1,12 @@
 import re
-import json
 
 def parse_xml_like(text):
+    # Замена экранированных символов на плейсхолдеры
+    escaped_lt = '__ESCAPED_LT__'
+    escaped_gt = '__ESCAPED_GT__'
+    text = re.sub(r'\\(<)', escaped_lt, text)
+    text = re.sub(r'\\(>)', escaped_gt, text)
+    
     tokens = re.split(r'(</?\w+>)', text, flags=re.DOTALL)
     stack = [(None, {}, False)]  # (tag_name, obj, is_defined)
     root = stack[0][1]
@@ -43,4 +48,18 @@ def parse_xml_like(text):
 
     if len(stack) != 1:
         raise ValueError("Unclosed tags remaining")
-    return root
+    
+    # Восстановление экранированных символов
+    def unescape(obj):
+        if isinstance(obj, dict):
+            return {k: unescape(v) for k, v in obj.items()}
+        elif isinstance(obj, str):
+            return obj.replace(escaped_lt, '<').replace(escaped_gt, '>')
+        else:
+            return obj
+    
+    return unescape(root)
+
+def xml_escape(text: str):
+    # Замена символов в тексте на экранированные символы
+    return text.replace('<', '\\<')
