@@ -216,6 +216,7 @@ class TelegramApp:
             await asyncio.sleep(5)
 
     async def __on_startup(self):
+        asyncio.create_task(self.check_old_users())
         asyncio.create_task(self.update_state())
 
     async def start(self):
@@ -396,7 +397,7 @@ class TelegramApp:
             self.configs.gpt, ["answer"]
         ) + '\n\n' + self.configs.side_prompts["enhance"]
 
-        print(f"[gpt_section][enhance] Side-System prompt:\n {'='*20}\n{sys_prompt}\n{'='*20}")
+        # print(f"[gpt_section][enhance] Side-System prompt:\n {'='*20}\n{sys_prompt}\n{'='*20}")
         print(f"[gpt_section][enhance] Side-System prompt generated...")
 
         side_status, raw_side = await self.side_ask(
@@ -410,8 +411,9 @@ class TelegramApp:
             await self.bot_send_text(chat_id = chat_id, text = "Произошла ошибка при улучшении изображения. Попробуйте еще раз")
             return
         raw_parsed = gptapp.parse_answer(raw_side)
-        print(raw_side)
-        print(f"[gpt_section][enhance] Parsed answer: {raw_parsed}")
+        # print(raw_side)
+        # print(f"[gpt_section][enhance] Parsed answer: {raw_parsed}")
+        print(f"[gpt_section][enhance] Parsed answer made")
         answer = raw_parsed["answer"]
         return answer, raw_parsed
 
@@ -499,6 +501,39 @@ class TelegramApp:
         print(f"[{uid}][gpt_section][msg_handler] Deleting temporary message")
         await self.bot.delete_message(chat_id, message_todel.message_id)
 
+    async def check_old_users(self):
+        while True:
+            non_old = []
+            for uid in self.userdb.configs.users.all():
+                user_data = self.userdb.data(uid)
+                if user_data and not (None in (user_data.get("last_activity", None), user_data.get("remind_time", None))):
+                    # print(f"Checking user {uid}: {user_data["last_activity"]}")
+                    if modtime.time() - user_data["last_activity"] > 60 * 60 * float(user_data["remind_time"]):
+                        print(f"Old user {uid}: {user_data["last_activity"]}")
+                        # try:
+                        
+                        await self.gpt_answer(
+                            str(uuid.uuid4()), 
+                            uid, 
+                            uid, 
+                            "Напиши какой-нибудь краткий вопрос или предложение вне контекста, как будто ты пишешь в давнюю переписку снова", 
+                            [], []
+                        )
+                        
+                        non_old.append(uid)
+                        
+                        # except Exception as e:
+                        #     print(f"Error in old user cleanup: {e} ({uid} {user_data["user_id"]})")
+                        # await bot.send_message(user_data["user_id"], )
+                else:
+                    self.userdb.ensure(uid, "remind_time", "6")
+                    self.userdb.ensure(uid, "last_activity", modtime.time())
+
+            for uid in non_old:
+                self.userdb.set(uid, "last_activity", modtime.time())
+
+            await asyncio.sleep(60)
+
     async def message_handler(self, message: Message) -> None:
         uid = message.from_user.id
         chat_id = message.chat.id
@@ -512,8 +547,8 @@ class TelegramApp:
         
         text = message.text or message.caption or "Запрос не предоставлен..."
         self.userdb.ensure(uid, "remind_time", "6")
-        self.userdb.ensure(uid, "voice_descript", False)
         self.userdb.ensure(uid, "last_activity", modtime.time())
+        self.userdb.ensure(uid, "voice_descript", False)
         self.userdb.ensure(uid, "voice", "ash")
 
         status, fpath, extension = await self.download_doc(message)
